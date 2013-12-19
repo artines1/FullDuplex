@@ -10,7 +10,9 @@ NumSamplesPerSymbol = 80*Wideband_Interpolation_rate; % the number of samples pe
 ConvCodeRate = 1/2; % Define the convolution code rate
 num_previousframes_for_CanChEst = 20; % Define the number of estimates that will be used for avergaging and
                                       % computation of the wire channel.
-SI_delay = 28; % Self Interfering channel delay. Delay from tx to rx in the same node     
+scale_train_FDMISO_wide = 1/sqrt(1);  % Define scaling factor for training signal for FDMISO widewoband
+SI_delay = 28; % Self Interfering channel delay. Delay from tx to rx in the same node
+
 
 TxDelay = 0;        %Number of noise samples per Rx capture; in [0:2^14]
 TxLength = 2^15-1; %Total of samples to transmit; in [0:2^14-TxDelay-1]
@@ -88,4 +90,82 @@ ShortTrainingSyms_wide_freq_64 = ...
 % Apply subcarrier mask
 ShortTrainingSyms_wide_freq_64 = ShortTrainingSyms_wide_freq_64 .* SubcarrierMask_TrainingWide_freq_64;
 
-ShortTrainingSyms_wide = FD_generate_wideband_AGCTrainSignal(ShortTrainingSyms_wide_freq_64,Wideband_Interpolation_rate);
+ShortTrainingSyms_wide = FD_GenerateAGCTrainingSymbol(ShortTrainingSyms_wide_freq_64,Wideband_Interpolation_rate);
+
+% Scale to span -1,1 range of DAC
+scale_ShortTrainingSyms_wide = ...
+    max([ max(abs(real(ShortTrainingSyms_wide))), max(abs(imag(ShortTrainingSyms_wide))) ]);
+
+ShortTrainingSyms_wide = ShortTrainingSyms_wide * (1/scale_ShortTrainingSyms_wide);
+
+nsamp_ShortTrainingSyms_wide = length(ShortTrainingSyms_wide); % Is equal to 320 samples
+
+% Define Channel Training (Pilot) parameters for wideband channel estimation.
+TrainSignal_wide_freq_bot_32 = [0 0 0 0 0 0 1 1 -1 -1 1 1 -1 1 -1 1 1 1 1 1 1 -1 -1 1 1 -1 1 -1 1 1 1 1]';  
+TrainSignal_wide_freq_top_31 = [1 -1 -1 1 1 -1 1 -1 1 -1 -1 -1 -1 -1 1 1 -1 -1 1 -1 1 -1 1 1 1 1 0 0 0 0 0]';  
+TrainSignal_wide_freq_64 = [TrainSignal_wide_freq_bot_32 ; 0 ; TrainSignal_wide_freq_top_31];  
+TrainSignal_wide_freq_64 = fftshift(TrainSignal_wide_freq_64);
+
+% Apply subcarrier mask
+TrainSignal_wide_freq_64 = TrainSignal_wide_freq_64 .* SubcarrierMask_TrainingWide_freq_64;
+
+% Call function that generates the training signal for wideband channel
+TrainSignal_wide = FD_GenerateWideCETrainingSignal(TrainSignal_wide_freq_64,Wideband_Interpolation_rate);
+
+% Scale to span -1,1 range of DAC
+scale_TrainSignal_wide = ...
+    max([ max(abs(real(TrainSignal_wide))), max(abs(imag(TrainSignal_wide))) ]);
+
+TrainSignal_wide = TrainSignal_wide * (1/scale_TrainSignal_wide);
+
+nsamp_ChTrainSignal_wide = length(TrainSignal_wide); % Is equal to 320 samples
+
+Result_TrainSignal_wide_PeakDigitalEnergy = max(abs(TrainSignal_wide).^2);
+Result_TrainSignal_wide_AvgDigitalEnergy = mean(abs(TrainSignal_wide).^2);
+
+% Define parameters for estimation of RSSI during transmission of wideband training
+nsamp_ChTrainSignal_wide_RSSI = nsamp_ChTrainSignal_wide/4; % RSSI ADC is 4 times slower than I/Q ADC
+
+% Create a vector with the indexes of the subcarriers that do not have and
+% have  training
+subcarriers_without_training = find(TrainSignal_wide_freq_64 == 0);
+subcarriers_with_training = find(TrainSignal_wide_freq_64 ~= 0);
+num_subcarriers_without_training = length(subcarriers_without_training);
+num_subcarriers_with_training = length(subcarriers_with_training);
+
+% These will be the same subcarriers without and with payload
+subcarriers_without_payload = union(subcarriers_without_training,Index_subcarriers_maybetraining_nopayload);
+subcarriers_with_payload = setdiff([1:1:64],subcarriers_without_payload).';
+num_subcarriers_without_payload = length(subcarriers_without_payload);
+num_subcarriers_with_payload = length(subcarriers_with_payload);
+
+
+% Concatenate training with zeros
+% We design the training signal so there is a gap of zeros between training
+% signals. This helps when plotting/visualization of received samples and
+% avoids energy in one training signal leaking to the other because of
+% transients. 
+
+TrainZs_wide_InitTune = zeros(1,nsamp_ChTrainSignal_wide); 
+
+Concat_Zeros_Training_wide_InitTune = [TrainZs_wide_InitTune, TrainSignal_wide];
+nsamp_Concat_Zeros_Training_wide_InitTune = length(Concat_Zeros_Training_wide_InitTune);
+
+% Specify number of samples to ignore after short training symbols
+num_Concat_Zeros_Training_wide_InitTune_ignore_for_DCOSetting = 3;
+nsamp_ingore_for_DCOSetting_wide_InitTune = num_Concat_Zeros_Training_wide_InitTune_ignore_for_DCOSetting*nsamp_Concat_Zeros_Training_wide_InitTune;
+
+% Specify number of channel estimates to compute per received frame
+num_CE_wideband_InitTune = 5;
+
+% Define parameters that will be used to fill the buffers with training signals.
+max_num_ZerosTraining_wide_InitTune = ...
+    num_Concat_Zeros_Training_wide_InitTune_ignore_for_DCOSetting + ...
+    num_CE_wideband_InitTune;
+
+T1_wide_InitTune_FrameTrain = [ShortTrainingSyms_wide, repmat(Concat_Zeros_Training_wide_InitTune,1,max_num_ZerosTraining_wide_InitTune), TrainZs_wide_InitTune];
+T2_wide_InitTune_FrameTrain = [ShortTrainingSyms_wide, repmat(Concat_Zeros_Training_wide_InitTune,1,max_num_ZerosTraining_wide_InitTune), TrainZs_wide_InitTune];
+CR1_wide_InitTune_FrameTrain = [ShortTrainingSyms_wide, repmat(Concat_Zeros_Training_wide_InitTune,1,max_num_ZerosTraining_wide_InitTune), TrainZs_wide_InitTune];
+
+nsamp_AGCChannelTrain_InitTune = max([length(T1_wide_InitTune_FrameTrain),...
+                             length(T2_wide_InitTune_FrameTrain),length(CR1_wide_InitTune_FrameTrain)]);
